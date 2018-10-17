@@ -1,0 +1,32 @@
+---
+#vars.yml
+  aws_access_key: your_aws_access_key
+  aws_secret_key: your_aws_secret_key
+  security_group: "webserver-security-group"
+  ec2_tag: "WebServer"
+  instance_type: t2.micro
+  image: ami-0ac019f4fcb7cb7e6
+  aws_region: us-east-1
+  count: 2
+  my_local_cidr_ip: 192.168.0.0/24
+  ec2_key_directory: "/home/user/.ssh/"
+
+
+# VPC
+  vpc_cidr: 10.0.0.0/16
+  vpc_name: "sky-vpc"
+
+
+# IP CIDR block for the VPC
+  vpc_cidr_block: 10.0.0.0/16
+
+
+# Internet Gateway Name
+  igw_name: "sky-igw"
+
+# ASG
+  asg_name: sky-asg
+  lc_name: sky-lc
+  asg_min: 2
+  asg_max: 2
+  elb_name: sky-elb

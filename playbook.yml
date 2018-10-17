@@ -1,0 +1,8 @@
+---
+
+- hosts: localhost
+  connection: local
+  pre_tasks:
+      - include_vars: vars.yml
+  roles:
+    - vpc

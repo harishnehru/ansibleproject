@@ -1,0 +1,182 @@
+---
+
+# Create Security Group for the EC2 Instance
+
+- name: Create a Security Group
+  ec2_group:
+      name:                   "{{ security_group }}"
+      description:            "Webserver Security Group"
+      region:                 "{{ aws_region }}"
+      vpc_id:                 "{{ vpc_id }}"
+      aws_access_key:         "{{aws_access_key}}"
+      aws_secret_key:         "{{aws_secret_key}}"
+      rules:
+        - proto: tcp
+          from_port: 22
+          to_port: 22
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          from_port: 80
+          to_port: 80
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          from_port: 443
+          to_port: 443
+          cidr_ip: 0.0.0.0/0
+        - proto: all
+          cidr_ip:            "{{ my_local_cidr_ip }}"
+      rules_egress:
+        - proto: all
+          cidr_ip: 0.0.0.0/0
+  register: webservers_group
+
+# create an EC2 key to associate with the newly created EC2 Instances
+- name: create a new ec2 key pair
+  ec2_key:
+      aws_access_key:           "{{ aws_access_key }}"
+      aws_secret_key:           "{{ aws_secret_key }}"
+      name:                     ec2_keypair
+      region:                   "{{ aws_region }}"
+  register: keypair
+
+- name: Copy EC2 Private Key locally so it can be later on used to SSH into the instance
+  copy: content="{{ keypair.key.private_key }}" dest={{ ec2_key_directory }}key.pem
+  when: keypair.changed == true
+
+- name: Create Launch Configuration
+  ec2_lc:
+    aws_access_key:               "{{ aws_access_key }}"
+    aws_secret_key:               "{{ aws_secret_key }}"
+    region:                       "{{ aws_region }}"
+    name:                         "{{ lc_name }}"
+    image_id:                     "{{ image }}"
+    key_name:                     "{{ keypair.key.name }}"
+    instance_type:                "{{ instance_type }}"
+    assign_public_ip:             true
+    security_groups:              "{{ webservers_group.group_id }}"
+    instance_monitoring: yes
+    user_data:                    "{{ lookup('file', 'user_data.sh') }}"
+  register: my_lc
+
+- debug: var=my_lc
+
+- name: Create the ELB for the application
+  ec2_elb_lb:
+      aws_access_key:              "{{ aws_access_key }}"
+      aws_secret_key:              "{{ aws_secret_key }}"
+      name:                        "{{elb_name }}"
+      state:                       present
+      region:                      "{{ aws_region }}"
+      cross_az_load_balancing:     yes
+      subnets:
+        - "{{ subnet_az1_id }}"
+        - "{{ subnet_az2_id }}"
+      listeners:
+        - protocol: http
+          load_balancer_port: 80
+          instance_port: 80
+      health_check:
+          ping_protocol: http
+          ping_port: 80
+          ping_path: "/index.nginx-debian.html"
+          response_timeout: 2
+          interval: 10
+          unhealthy_threshold: 2
+          healthy_threshold: 2
+          connection_draining_timeout: 60
+  register: elb
+
+- debug: var=elb
+
+
+- name: Configure Auto Scaling Group
+  ec2_asg:
+    aws_access_key:                 "{{ aws_access_key }}"
+    aws_secret_key:                 "{{ aws_secret_key }}"
+    region:                         "{{ aws_region }}"
+    name:                           "{{ asg_name }}"
+    vpc_zone_identifier:
+      - "{{ subnet_az1_id }}"
+      - "{{ subnet_az2_id }}"
+    launch_config_name:              "{{ lc_name }}"
+    availability_zones:
+      - us-east-1a
+      - us-east-1b
+    health_check_type: EC2
+    health_check_period: 300
+    desired_capacity:                "{{ asg_min }}"
+    min_size:                        "{{ asg_min }}"
+    max_size:                        "{{ asg_max }}"
+    tags:
+     - Name:                         "{{ asg_name }}"
+    load_balancers:                  "{{ elb_name }}"
+    state: present
+  register: asg
+
+- debug: var=asg
+
+
+- name: Configure Scaling Policies
+  ec2_scaling_policy:
+    aws_access_key:                  "{{ aws_access_key }}"
+    aws_secret_key:                  "{{ aws_secret_key }}"
+    region:                          "{{ aws_region }}"
+    name:                            "{{ item.name }}"
+    asg_name:                        "{{ asg_name }}"
+    state: present
+    adjustment_type:                 "{{ item.adjustment_type }}"
+    min_adjustment_step:             "{{ item.min_adjustment_step }}"
+    scaling_adjustment:              "{{ item.scaling_adjustment }}"
+    cooldown:                        "{{ item.cooldown }}"
+  with_items:
+    - name:                          "Increase Group Size"
+      adjustment_type:               "ChangeInCapacity"
+      scaling_adjustment: +1
+      min_adjustment_step: 1
+      cooldown: 180
+    - name:                           "Decrease Group Size"
+      adjustment_type:                "ChangeInCapacity"
+      scaling_adjustment: -1
+      min_adjustment_step: 1
+      cooldown: 300
+  register: scaling_policy
+
+- debug: var=scaling_policy
+
+- name: Define Metric Alarms configuration
+  set_fact:
+    metric_alarms:
+      - name:                         "{{ asg_name }}-ScaleUp"
+        comparison:                   ">="
+        threshold:                    70.0
+        alarm_actions:
+          - "{{ scaling_policy.results[0].arn }}"
+      - name:                         "{{ asg_name }}-ScaleDown"
+        comparison:                   "<="
+        threshold:                    30.0
+        alarm_actions:
+          - "{{ scaling_policy.results[1].arn }}"
+
+- name: Configure Metric Alarms
+  ec2_metric_alarm:
+    aws_access_key:                     "{{ aws_access_key }}"
+    aws_secret_key:                     "{{ aws_secret_key }}"
+    region:                             "{{ aws_region }}"
+    name:                               "{{ item.name }}"
+    state:                              present
+    metric:                             "CPUUtilization"
+    namespace:                          "AWS/EC2"
+    statistic:                          "Average"
+    comparison:                         "{{ item.comparison }}"
+    threshold:                          "{{ item.threshold }}"
+    period:                             60
+    evaluation_periods:                 5
+    unit:                               "Percent"
+    dimensions:
+      AutoScalingGroupName:             "{{ asg_name }}"
+    alarm_actions:                      "{{ item.alarm_actions }}"
+  with_items:                           "{{ metric_alarms }}"
+  when:                                 "{{ asg.max_size }} > 1"
+  register: alarms
+
+- debug: var=alarms
